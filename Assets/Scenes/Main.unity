@@ -752,7 +752,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 952cbdf623b18471c8d2b6f69793f040, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::TestShooter
-  shotSpeed: 30
+  shotSpeed: 60
   projectileLifetime: 3
 --- !u!1 &1056172582
 GameObject:

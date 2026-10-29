@@ -19,6 +19,7 @@ public class PrototypeGameManager : MonoBehaviour
     [SerializeField, Range(2, 4)] private int playerCount = 2;
     [SerializeField, Min(1)] private int maxRounds = 10;
     [SerializeField, Min(1f)] private float turnSeconds = 15f;
+    [SerializeField, Min(0)] private int firstRoundMonuments = 3;
 
     public GamePhase Phase { get; private set; }
     public int CurrentPlayer { get; private set; }
@@ -45,9 +46,25 @@ public class PrototypeGameManager : MonoBehaviour
     private float deadline;
     private bool shotTaken;
     private int shootingRoundObelisks;
+    private int roundMonumentAllowance;
     private string status = "Starting...";
     private GUIStyle titleStyle;
     private GUIStyle detailStyle;
+    private GUIStyle rowStyle;
+
+    // Player 1 blue, player 2 red; extras for 3-4 player matches.
+    private static readonly Color[] PlayerColors =
+    {
+        new Color(0.25f, 0.55f, 1f), new Color(1f, 0.3f, 0.3f),
+        new Color(0.3f, 0.9f, 0.4f), new Color(1f, 0.85f, 0.25f)
+    };
+    private static readonly Color MonumentIconColor = new Color(0.62f, 0.62f, 0.62f);
+    private static readonly Color ObeliskIconColor = new Color(0.9f, 0.2f, 0.2f);
+    private static readonly Color ShotIconColor = new Color(0.85f, 0.85f, 0.85f);
+    private const float OutlineThickness = 6f;
+    private const int MaxIcons = 5;
+
+    public static Color PlayerColor(int player) => PlayerColors[player % PlayerColors.Length];
 
     private void Start()
     {
@@ -85,10 +102,11 @@ public class PrototypeGameManager : MonoBehaviour
 
     private IEnumerator RunMatch()
     {
-        int monumentAllowance = 5;
+        int monumentAllowance = firstRoundMonuments;
         for (int round = 1; round <= maxRounds; round++)
         {
             Round = round;
+            roundMonumentAllowance = monumentAllowance;
             if (monumentAllowance > 0)
                 for (int player = 0; player < playerCount; player++)
                     yield return RunTurn(GamePhase.MonumentBuilding, player, monumentAllowance);
@@ -220,8 +238,14 @@ public class PrototypeGameManager : MonoBehaviour
 
     public bool PointerOverHUD(Vector2 pointer)
     {
-        return pointer.y >= Screen.height - 112f;
+        // Pointer is bottom-left origin; GUI rects are top-left origin.
+        Vector2 guiPoint = new Vector2(pointer.x, Screen.height - pointer.y);
+        return pointer.y >= Screen.height - 112f || (ShowInventory && InventoryRect.Contains(guiPoint));
     }
+
+    private bool ShowInventory => MatchStarted && Phase != GamePhase.Finished;
+    private Rect InventoryRect => new Rect(OutlineThickness + 10f, Screen.height - OutlineThickness - 10f
+        - (Phase == GamePhase.Shooting ? 58f : 96f), 300f, Phase == GamePhase.Shooting ? 48f : 86f);
 
     private string PhaseLabel()
     {
@@ -240,9 +264,17 @@ public class PrototypeGameManager : MonoBehaviour
         {
             titleStyle = new GUIStyle(GUI.skin.label) { fontSize = 22, alignment = TextAnchor.MiddleCenter };
             detailStyle = new GUIStyle(GUI.skin.label) { fontSize = 15, alignment = TextAnchor.MiddleCenter };
-            titleStyle.normal.textColor = Color.white;
+            rowStyle = new GUIStyle(GUI.skin.label) { fontSize = 15, alignment = TextAnchor.MiddleLeft };
             detailStyle.normal.textColor = Color.white;
         }
+        Color accent = PlayerColor(CurrentPlayer);
+        titleStyle.normal.textColor = ShowInventory ? accent : Color.white;
+        if (ShowInventory)
+        {
+            DrawTurnOutline(accent);
+            DrawInventory(accent);
+        }
+
         GUI.Box(new Rect(8, 8, Screen.width - 16, 100), "");
         string heading = !MatchStarted ? "Setup needed" : Phase == GamePhase.Finished
             ? "Match complete" : $"Player {CurrentPlayer + 1} — {PhaseLabel()} — Round {Round}/{maxRounds}";
@@ -252,8 +284,74 @@ public class PrototypeGameManager : MonoBehaviour
         GUI.Label(new Rect(12, 43, Screen.width - 24, 24), details, detailStyle);
         string controls = Phase == GamePhase.Shooting
             ? "A/D : move within your shooting section -- Click: fire"
-            : "A/D: move -- R: rotate -- T: flip -- Click: place";
+            : "A/D: move -- R: rotate -- T: flip -- Click/E: place";
         if (MatchStarted && Phase != GamePhase.Finished)
             GUI.Label(new Rect(12, 70, Screen.width - 24, 24), controls, detailStyle);
+    }
+
+    private void DrawTurnOutline(Color color)
+    {
+        Texture tex = Texture2D.whiteTexture;
+        Color previous = GUI.color;
+        GUI.color = color;
+        GUI.DrawTexture(new Rect(0, 0, Screen.width, OutlineThickness), tex);
+        GUI.DrawTexture(new Rect(0, Screen.height - OutlineThickness, Screen.width, OutlineThickness), tex);
+        GUI.DrawTexture(new Rect(0, 0, OutlineThickness, Screen.height), tex);
+        GUI.DrawTexture(new Rect(Screen.width - OutlineThickness, 0, OutlineThickness, Screen.height), tex);
+        GUI.color = previous;
+    }
+
+    private void DrawInventory(Color accent)
+    {
+        Rect panel = InventoryRect;
+        GUI.Box(panel, "");
+        Rect row = new Rect(panel.x + 12f, panel.y + 9f, panel.width - 24f, 30f);
+        if (Phase == GamePhase.Shooting)
+        {
+            DrawInventoryRow(row, "Shot", shotTaken ? 0 : 1, 1, new Vector2(14f, 14f),
+                ShotIconColor, accent, true);
+            return;
+        }
+
+        bool building = Phase == GamePhase.MonumentBuilding;
+        int monumentsLeft = building ? BlocksRemaining : 0;
+        int obelisksLeft = building ? 1 : BlocksRemaining;
+        DrawInventoryRow(row, "Monuments", monumentsLeft, roundMonumentAllowance,
+            new Vector2(24f, 8f), MonumentIconColor, accent, building);
+        row.y += 38f;
+        DrawInventoryRow(row, "Obelisk", obelisksLeft, 1, new Vector2(14f, 14f),
+            ObeliskIconColor, accent, !building);
+    }
+
+    // Remaining items draw solid, used ones faded. The active row takes the player's color.
+    private void DrawInventoryRow(Rect row, string label, int left, int total, Vector2 iconSize,
+        Color iconColor, Color accent, bool active)
+    {
+        rowStyle.normal.textColor = active ? accent : new Color(0.7f, 0.7f, 0.7f);
+        GUI.Label(new Rect(row.x, row.y, 125f, row.height), $"{label}  {left}/{total}", rowStyle);
+
+        Color previous = GUI.color;
+        float x = row.x + 130f;
+        int icons = Mathf.Min(total, MaxIcons);
+        for (int i = 0; i < icons; i++)
+        {
+            Color c = iconColor;
+            c.a = i < left ? (active ? 1f : 0.6f) : 0.18f;
+            GUI.color = c;
+            GUI.DrawTexture(new Rect(x, row.y + (row.height - iconSize.y) * 0.5f, iconSize.x, iconSize.y),
+                Texture2D.whiteTexture);
+            x += iconSize.x + 5f;
+        }
+        if (total > MaxIcons)
+        {
+            GUI.color = previous;
+            GUI.Label(new Rect(x, row.y, 40f, row.height), "+", rowStyle);
+        }
+        if (total == 0)
+        {
+            GUI.color = previous;
+            GUI.Label(new Rect(x, row.y, 140f, row.height), "none this round", rowStyle);
+        }
+        GUI.color = previous;
     }
 }

@@ -113,13 +113,18 @@ public class BlockPlacer : MonoBehaviour
 
         bool blocked = Physics.CheckBox(boxCenter, halfSize * 0.995f, rotation,
             Physics.AllLayers, QueryTriggerInteraction.Ignore);
-        Color color = blocked ? new Color(1f, 0.2f, 0.2f) : new Color(0.2f, 1f, 0.35f);
+        // Green only when a press this frame would place, so the color never lies.
+        bool coolingDown = Time.time < nextPlacementTime;
+        Color color = blocked ? new Color(1f, 0.2f, 0.2f)
+            : coolingDown ? new Color(1f, 0.85f, 0.2f) : new Color(0.2f, 1f, 0.35f);
         previewColor.SetColor("_BaseColor", color);
         previewColor.SetColor("_Color", color);
         foreach (Renderer renderer in previewRenderers)
             renderer.SetPropertyBlock(previewColor);
 
-        if (!blocked && mouse.leftButton.wasPressedThisFrame && Time.time >= nextPlacementTime)
+        bool placePressed = mouse.leftButton.wasPressedThisFrame
+            || (keyboard != null && keyboard.eKey.wasPressedThisFrame);
+        if (!blocked && !coolingDown && placePressed)
         {
             GameObject placed = Instantiate(currentPrefab, position, rotation);
             if (!manager.TryRegisterPlacement(placed))
