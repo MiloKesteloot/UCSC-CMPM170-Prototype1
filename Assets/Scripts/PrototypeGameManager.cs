@@ -93,8 +93,12 @@ public class PrototypeGameManager : MonoBehaviour
         new Color(0.25f, 0.55f, 1f), new Color(1f, 0.3f, 0.3f),
         new Color(0.3f, 0.9f, 0.4f), new Color(1f, 0.85f, 0.25f)
     };
+    public static readonly Color ObeliskColor = new Color(0.04f, 0.04f, 0.04f);
+    // How strongly placed monuments lean toward their owner's color (0 = grey, 1 = full color).
+    public const float OwnerTint = 0.35f;
     private static readonly Color MonumentIconColor = new Color(0.62f, 0.62f, 0.62f);
-    private static readonly Color ObeliskIconColor = new Color(0.9f, 0.2f, 0.2f);
+    private static readonly Color ObeliskIconColor = ObeliskColor;
+    private static readonly Color IconOutlineColor = new Color(0.8f, 0.8f, 0.8f);
     private static readonly Color ShotIconColor = new Color(0.85f, 0.85f, 0.85f);
     private static readonly Color MutedText = new Color(0.7f, 0.7f, 0.7f);
     private static readonly Color GainColor = new Color(0.45f, 1f, 0.5f);
@@ -517,13 +521,24 @@ public class PrototypeGameManager : MonoBehaviour
         Color previous = GUI.color;
         float x = row.x + 130f;
         int icons = Mathf.Min(total, MaxIcons);
+        bool outlined = iconColor.grayscale < 0.2f; // dark icons vanish against the panel otherwise
         for (int i = 0; i < icons; i++)
         {
+            float alpha = i < left ? (active ? 1f : 0.6f) : 0.18f;
+            Rect icon = new Rect(x, row.y + (row.height - iconSize.y) * 0.5f, iconSize.x, iconSize.y);
+            if (outlined)
+            {
+                Color edge = IconOutlineColor;
+                edge.a = alpha;
+                GUI.color = edge;
+                GUI.DrawTexture(new Rect(icon.x - 1.5f, icon.y - 1.5f, icon.width + 3f, icon.height + 3f),
+                    Texture2D.whiteTexture);
+            }
             Color c = iconColor;
-            c.a = i < left ? (active ? 1f : 0.6f) : 0.18f;
+            c.a = outlined ? 1f : alpha;
+            if (outlined && i >= left) c = new Color(0.25f, 0.25f, 0.25f, alpha);
             GUI.color = c;
-            GUI.DrawTexture(new Rect(x, row.y + (row.height - iconSize.y) * 0.5f, iconSize.x, iconSize.y),
-                Texture2D.whiteTexture);
+            GUI.DrawTexture(icon, Texture2D.whiteTexture);
             x += iconSize.x + 5f;
         }
         GUI.color = previous;
