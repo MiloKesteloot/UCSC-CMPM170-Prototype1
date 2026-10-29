@@ -1,8 +1,10 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.SceneManagement;
 
-// Owns phase order and deadlines. Scoring/collapse rules are the next milestone.
+// Owns phase order, deadlines, scoring, the collapse rule and all HUD drawing.
 [RequireComponent(typeof(BlockPlacer), typeof(TestShooter), typeof(PrototypeCamera))]
 public class PrototypeGameManager : MonoBehaviour
 {
@@ -10,16 +12,27 @@ public class PrototypeGameManager : MonoBehaviour
 
     [Header("Scene references")]
     [SerializeField] private Camera gameCamera;
+    [Tooltip("Optional. Blocks touching it count as fallen. Leave empty to have no floor.")]
     [SerializeField] private Collider groundCollider;
+    [Tooltip("Blocks whose center drops below this height count as fallen.")]
+    [SerializeField] private float fallHeight = -2f;
     [Header("Prefab assets")]
     [SerializeField] private GameObject monumentPrefab;
     [SerializeField] private GameObject obeliskPrefab;
     [SerializeField] private Rigidbody projectilePrefab;
     [Header("Match")]
     [SerializeField, Range(2, 4)] private int playerCount = 2;
-    [SerializeField, Min(1)] private int maxRounds = 10;
+    [SerializeField, Min(1)] private int maxRounds = 3;
     [SerializeField, Min(1f)] private float turnSeconds = 15f;
     [SerializeField, Min(0)] private int firstRoundMonuments = 3;
+    [Header("Scoring")]
+    [SerializeField] private int shootObeliskPoints = 10;
+    [SerializeField] private int shootMonumentPoints = -5;
+    [SerializeField] private int buildObeliskPoints = -10;
+    [SerializeField] private int buildMonumentPoints = -5;
+    [Tooltip("Knocking over more than half the tower in one placement or shot ends the match " +
+        "and zeroes that player's points, once the tower has at least this many blocks.")]
+    [SerializeField, Min(1)] private int minBlocksForCollapse = 4;
 
     public GamePhase Phase { get; private set; }
     public int CurrentPlayer { get; private set; }
@@ -35,8 +48,9 @@ public class PrototypeGameManager : MonoBehaviour
         && (Phase == GamePhase.MonumentBuilding || Phase == GamePhase.ObeliskPlacement);
     public bool CanShoot => TurnActive && SecondsLeft > 0f && !shotTaken
         && Phase == GamePhase.Shooting;
+    public int Score(int player) => scores[player];
 
-    // Future scoring can go here. Player index is zero based.
+    // Player index is zero based.
     public event System.Action<PrototypeBlock, int, GamePhase> BlockFell;
 
     private readonly List<PrototypeBlock> blocks = new List<PrototypeBlock>();
@@ -47,10 +61,31 @@ public class PrototypeGameManager : MonoBehaviour
     private bool shotTaken;
     private int shootingRoundObelisks;
     private int roundMonumentAllowance;
+    private int[] scores = new int[4];
     private string status = "Starting...";
-    private GUIStyle titleStyle;
+
+    // The current "event" is the latest placement or shot; falls after it count toward it.
+    private int eventStanding;
+    private int eventFallen;
+    private PrototypeBlock eventBlock;
+    private int collapsedBy = -1;
+
+    private struct ScorePopup
+    {
+        public string text;
+        public int points;
+        public float time;
+    }
+    private readonly List<ScorePopup> popups = new List<ScorePopup>();
+    private const float PopupSeconds = 3f;
+
+    private GUIStyle headingStyle;
     private GUIStyle detailStyle;
+    private GUIStyle hintStyle;
     private GUIStyle rowStyle;
+    private GUIStyle rowRightStyle;
+    private GUIStyle popupStyle;
+    private GUIStyle bigStyle;
 
     // Player 1 blue, player 2 red; extras for 3-4 player matches.
     private static readonly Color[] PlayerColors =
@@ -61,7 +96,12 @@ public class PrototypeGameManager : MonoBehaviour
     private static readonly Color MonumentIconColor = new Color(0.62f, 0.62f, 0.62f);
     private static readonly Color ObeliskIconColor = new Color(0.9f, 0.2f, 0.2f);
     private static readonly Color ShotIconColor = new Color(0.85f, 0.85f, 0.85f);
+    private static readonly Color MutedText = new Color(0.7f, 0.7f, 0.7f);
+    private static readonly Color GainColor = new Color(0.45f, 1f, 0.5f);
+    private static readonly Color LossColor = new Color(1f, 0.5f, 0.35f);
     private const float OutlineThickness = 6f;
+    private const float Margin = 10f;
+    private const float TopBarHeight = 92f;
     private const int MaxIcons = 5;
 
     public static Color PlayerColor(int player) => PlayerColors[player % PlayerColors.Length];
@@ -71,11 +111,12 @@ public class PrototypeGameManager : MonoBehaviour
         playerCount = Mathf.Clamp(playerCount, 2, 4);
         maxRounds = Mathf.Max(1, maxRounds);
         turnSeconds = Mathf.Max(1f, turnSeconds);
-        if (gameCamera == null || groundCollider == null || projectilePrefab == null
+        scores = new int[playerCount];
+        if (gameCamera == null || projectilePrefab == null
             || !ValidBlockPrefab(monumentPrefab) || !ValidBlockPrefab(obeliskPrefab)
             || projectilePrefab.GetComponent<Collider>() == null)
         {
-            status = "Setup incomplete: assign all five references on Prototype Game Manager.";
+            status = "Setup incomplete: assign the camera and prefabs on Prototype Game Manager.";
             Debug.LogError(status, this);
             return;
         }
@@ -88,6 +129,13 @@ public class PrototypeGameManager : MonoBehaviour
         orbitCamera.Initialize(this, gameCamera);
         MatchStarted = true;
         StartCoroutine(RunMatch());
+    }
+
+    private void Update()
+    {
+        Keyboard keyboard = Keyboard.current;
+        if (Phase == GamePhase.Finished && keyboard != null && keyboard.rKey.wasPressedThisFrame)
+            SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
     }
 
     private bool ValidBlockPrefab(GameObject prefab)
@@ -119,13 +167,8 @@ public class PrototypeGameManager : MonoBehaviour
                 yield return RunTurn(GamePhase.Shooting, player, 0);
 
             monumentAllowance = shootingRoundObelisks;
-            // Double score for surviving obelisk values here once scoring exists.
         }
-
-        TurnActive = false;
-        Settling = false;
-        Phase = GamePhase.Finished;
-        status = "Turn-loop test complete. Stop Play mode to reset.";
+        FinishMatch();
     }
 
     private IEnumerator RunTurn(GamePhase phase, int player, int allowance)
@@ -135,6 +178,7 @@ public class PrototypeGameManager : MonoBehaviour
         BlocksRemaining = allowance;
         shotTaken = false;
         StandingAtTurnStart = CountStandingBlocks();
+        BeginEvent(null);
         orbitCamera.BeginTurn(player, phase == GamePhase.Shooting);
 
         if (phase != GamePhase.Shooting)
@@ -150,10 +194,25 @@ public class PrototypeGameManager : MonoBehaviour
         TurnActive = false;
         placer.EndPlacement();
         Settling = true;
-        status = timedOut ? "Time up — unused placements/shot forfeited. Settling..." : "Settling...";
+        status = timedOut ? "Time's up! Unused pieces are forfeited. Settling..." : "Settling...";
         yield return WaitForPhysics();
-        CleanupFallenBlocks();
+        // Clearing fallen blocks can drop blocks that were resting on them, so repeat until stable.
+        while (CleanupFallenBlocks() > 0)
+        {
+            yield return null;
+            WakeBlocks();
+            yield return WaitForPhysics();
+        }
         Settling = false;
+    }
+
+    private void FinishMatch()
+    {
+        StopAllCoroutines();
+        if (placer != null) placer.EndPlacement();
+        TurnActive = false;
+        Settling = false;
+        Phase = GamePhase.Finished;
     }
 
     private bool TurnFinished()
@@ -161,12 +220,20 @@ public class PrototypeGameManager : MonoBehaviour
         return Phase == GamePhase.Shooting ? shotTaken : BlocksRemaining <= 0;
     }
 
+    private void BeginEvent(PrototypeBlock placed)
+    {
+        eventStanding = CountStandingBlocks();
+        eventFallen = 0;
+        eventBlock = placed;
+    }
+
     public bool TryRegisterPlacement(GameObject placed)
     {
         if (!CanPlace) return false;
         PrototypeBlock block = placed.GetComponent<PrototypeBlock>();
         if (block == null) block = placed.AddComponent<PrototypeBlock>();
-        block.Initialize(this, groundCollider, Phase == GamePhase.ObeliskPlacement, CurrentPlayer);
+        BeginEvent(block);
+        block.Initialize(this, groundCollider, fallHeight, Phase == GamePhase.ObeliskPlacement, CurrentPlayer);
         blocks.Add(block);
         BlocksRemaining--;
         return true;
@@ -175,6 +242,7 @@ public class PrototypeGameManager : MonoBehaviour
     public bool TryUseShot()
     {
         if (!CanShoot) return false;
+        BeginEvent(null);
         shotTaken = true;
         return true;
     }
@@ -182,12 +250,34 @@ public class PrototypeGameManager : MonoBehaviour
     public void NotifyBlockFell(PrototypeBlock block)
     {
         if (!MatchStarted || Phase == GamePhase.Finished || !blocks.Contains(block)) return;
-        if (Phase == GamePhase.Shooting && block.IsObelisk)
+        bool shooting = Phase == GamePhase.Shooting;
+        if (shooting && block.IsObelisk)
             shootingRoundObelisks++;
 
-        Debug.Log($"Player {CurrentPlayer + 1}: {(block.IsObelisk ? "obelisk" : "monument")} fell during {Phase}.");
-        // apply adding or loosing points and collapse detection here or with BlockFell.
+        int points = shooting
+            ? (block.IsObelisk ? shootObeliskPoints : shootMonumentPoints)
+            : (block.IsObelisk ? buildObeliskPoints : buildMonumentPoints);
+        AddPoints(CurrentPlayer, points,
+            $"Player {CurrentPlayer + 1} knocked over {(block.IsObelisk ? "an obelisk" : "a monument")}");
         BlockFell?.Invoke(block, CurrentPlayer, Phase);
+
+        // The block just placed slipping off is not the tower collapsing.
+        if (block == eventBlock) return;
+        eventFallen++;
+        if (eventStanding >= minBlocksForCollapse && eventFallen * 2 > eventStanding)
+        {
+            collapsedBy = CurrentPlayer;
+            scores[CurrentPlayer] = 0;
+            Debug.Log($"Player {CurrentPlayer + 1} knocked over {eventFallen} of {eventStanding} blocks. Match over.");
+            FinishMatch();
+        }
+    }
+
+    private void AddPoints(int player, int points, string reason)
+    {
+        scores[player] += points;
+        popups.Add(new ScorePopup { text = reason, points = points, time = Time.time });
+        Debug.Log($"{reason}: {points:+#;-#;0} (total {scores[player]})");
     }
 
     private IEnumerator WaitForPhysics()
@@ -224,35 +314,69 @@ public class PrototypeGameManager : MonoBehaviour
         return count;
     }
 
-    private void CleanupFallenBlocks()
+    // Returns how many fallen blocks were destroyed.
+    private int CleanupFallenBlocks()
     {
+        int destroyed = 0;
         for (int i = blocks.Count - 1; i >= 0; i--)
         {
             if (blocks[i] == null || blocks[i].HasFallen)
             {
-                if (blocks[i] != null) Destroy(blocks[i].gameObject);
+                if (blocks[i] != null)
+                {
+                    Destroy(blocks[i].gameObject);
+                    destroyed++;
+                }
                 blocks.RemoveAt(i);
             }
         }
+        return destroyed;
+    }
+
+    private void WakeBlocks()
+    {
+        foreach (PrototypeBlock block in blocks)
+            if (block != null && block.Body != null) block.Body.WakeUp();
     }
 
     public bool PointerOverHUD(Vector2 pointer)
     {
+        if (Phase == GamePhase.Finished) return true;
         // Pointer is bottom-left origin; GUI rects are top-left origin.
         Vector2 guiPoint = new Vector2(pointer.x, Screen.height - pointer.y);
-        return pointer.y >= Screen.height - 112f || (ShowInventory && InventoryRect.Contains(guiPoint));
+        return TopBarRect.Contains(guiPoint)
+            || (ShowMatchHUD && (InventoryRect.Contains(guiPoint) || ScoresRect.Contains(guiPoint)));
     }
 
-    private bool ShowInventory => MatchStarted && Phase != GamePhase.Finished;
-    private Rect InventoryRect => new Rect(OutlineThickness + 10f, Screen.height - OutlineThickness - 10f
-        - (Phase == GamePhase.Shooting ? 58f : 96f), 300f, Phase == GamePhase.Shooting ? 48f : 86f);
+    private bool ShowMatchHUD => MatchStarted && Phase != GamePhase.Finished;
+    private Rect TopBarRect => new Rect(OutlineThickness + Margin, OutlineThickness + Margin,
+        Screen.width - 2f * (OutlineThickness + Margin), TopBarHeight);
+    private Rect InventoryRect
+    {
+        get
+        {
+            float height = Phase == GamePhase.Shooting ? 48f : 86f;
+            return new Rect(OutlineThickness + Margin, Screen.height - OutlineThickness - Margin - height,
+                300f, height);
+        }
+    }
+    private Rect ScoresRect
+    {
+        get
+        {
+            float width = 280f;
+            float height = 44f + playerCount * 28f + 50f;
+            return new Rect(Screen.width - OutlineThickness - Margin - width,
+                Screen.height - OutlineThickness - Margin - height, width, height);
+        }
+    }
 
     private string PhaseLabel()
     {
         switch (Phase)
         {
             case GamePhase.MonumentBuilding: return "Build monuments";
-            case GamePhase.ObeliskPlacement: return "Place obelisk";
+            case GamePhase.ObeliskPlacement: return "Place your obelisk";
             case GamePhase.Shooting: return "Shoot";
             default: return "Finished";
         }
@@ -260,33 +384,68 @@ public class PrototypeGameManager : MonoBehaviour
 
     private void OnGUI()
     {
-        if (titleStyle == null)
+        if (headingStyle == null) CreateStyles();
+
+        if (!MatchStarted)
         {
-            titleStyle = new GUIStyle(GUI.skin.label) { fontSize = 22, alignment = TextAnchor.MiddleCenter };
-            detailStyle = new GUIStyle(GUI.skin.label) { fontSize = 15, alignment = TextAnchor.MiddleCenter };
-            rowStyle = new GUIStyle(GUI.skin.label) { fontSize = 15, alignment = TextAnchor.MiddleLeft };
-            detailStyle.normal.textColor = Color.white;
+            DrawTopBar("Setup needed", Color.white, status, "");
+            return;
         }
-        Color accent = PlayerColor(CurrentPlayer);
-        titleStyle.normal.textColor = ShowInventory ? accent : Color.white;
-        if (ShowInventory)
+        if (Phase == GamePhase.Finished)
         {
-            DrawTurnOutline(accent);
-            DrawInventory(accent);
+            DrawEndScreen();
+            return;
         }
 
-        GUI.Box(new Rect(8, 8, Screen.width - 16, 100), "");
-        string heading = !MatchStarted ? "Setup needed" : Phase == GamePhase.Finished
-            ? "Match complete" : $"Player {CurrentPlayer + 1} — {PhaseLabel()} — Round {Round}/{maxRounds}";
-        GUI.Label(new Rect(12, 12, Screen.width - 24, 30), heading, titleStyle);
-        string details = TurnActive ? $"{Mathf.CeilToInt(SecondsLeft)} seconds"
-            + (Phase == GamePhase.Shooting ? " | One shot" : $" | {BlocksRemaining} block(s) left") : status;
-        GUI.Label(new Rect(12, 43, Screen.width - 24, 24), details, detailStyle);
+        Color accent = PlayerColor(CurrentPlayer);
+        DrawTurnOutline(accent);
+
+        string details;
+        if (TurnActive)
+        {
+            int seconds = Mathf.CeilToInt(SecondsLeft);
+            details = $"Round {Round} of {maxRounds}   |   {seconds}s left";
+            detailStyle.normal.textColor = seconds <= 5 ? LossColor : Color.white;
+        }
+        else
+        {
+            details = $"Round {Round} of {maxRounds}   |   {status}";
+            detailStyle.normal.textColor = MutedText;
+        }
         string controls = Phase == GamePhase.Shooting
-            ? "A/D : move within your shooting section -- Click: fire"
-            : "A/D: move -- R: rotate -- T: flip -- Click/E: place";
-        if (MatchStarted && Phase != GamePhase.Finished)
-            GUI.Label(new Rect(12, 70, Screen.width - 24, 24), controls, detailStyle);
+            ? "A / D  move within your section     Click  fire"
+            : "A / D  orbit     R  rotate     T  stand upright     Click or E  place";
+        DrawTopBar($"Player {CurrentPlayer + 1}  —  {PhaseLabel()}", accent, details, controls);
+
+        DrawPopups();
+        DrawInventory(accent);
+        DrawScores();
+    }
+
+    private void CreateStyles()
+    {
+        headingStyle = new GUIStyle(GUI.skin.label)
+            { fontSize = 22, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+        detailStyle = new GUIStyle(GUI.skin.label) { fontSize = 15, alignment = TextAnchor.MiddleCenter };
+        hintStyle = new GUIStyle(GUI.skin.label) { fontSize = 13, alignment = TextAnchor.MiddleCenter };
+        hintStyle.normal.textColor = MutedText;
+        rowStyle = new GUIStyle(GUI.skin.label) { fontSize = 15, alignment = TextAnchor.MiddleLeft };
+        rowRightStyle = new GUIStyle(rowStyle) { alignment = TextAnchor.MiddleRight, fontStyle = FontStyle.Bold };
+        popupStyle = new GUIStyle(GUI.skin.label)
+            { fontSize = 16, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+        bigStyle = new GUIStyle(GUI.skin.label)
+            { fontSize = 34, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+    }
+
+    private void DrawTopBar(string heading, Color headingColor, string details, string controls)
+    {
+        Rect bar = TopBarRect;
+        GUI.Box(bar, "");
+        headingStyle.normal.textColor = headingColor;
+        GUI.Label(new Rect(bar.x, bar.y + 6f, bar.width, 30f), heading, headingStyle);
+        GUI.Label(new Rect(bar.x, bar.y + 36f, bar.width, 24f), details, detailStyle);
+        if (controls.Length > 0)
+            GUI.Label(new Rect(bar.x, bar.y + 62f, bar.width, 22f), controls, hintStyle);
     }
 
     private void DrawTurnOutline(Color color)
@@ -298,6 +457,31 @@ public class PrototypeGameManager : MonoBehaviour
         GUI.DrawTexture(new Rect(0, Screen.height - OutlineThickness, Screen.width, OutlineThickness), tex);
         GUI.DrawTexture(new Rect(0, 0, OutlineThickness, Screen.height), tex);
         GUI.DrawTexture(new Rect(Screen.width - OutlineThickness, 0, OutlineThickness, Screen.height), tex);
+        GUI.color = previous;
+    }
+
+    // Recent point changes stack under the top bar and fade out.
+    private void DrawPopups()
+    {
+        popups.RemoveAll(p => Time.time - p.time > PopupSeconds);
+        Color previous = GUI.color;
+        float y = TopBarRect.yMax + 8f;
+        int first = Mathf.Max(0, popups.Count - 4);
+        for (int i = popups.Count - 1; i >= first; i--)
+        {
+            ScorePopup popup = popups[i];
+            float alpha = Mathf.Clamp01((PopupSeconds - (Time.time - popup.time)) / 0.75f);
+            string text = $"{popup.points:+#;-#;0}   {popup.text}";
+            float width = popupStyle.CalcSize(new GUIContent(text)).x + 28f;
+            Rect rect = new Rect((Screen.width - width) * 0.5f, y, width, 28f);
+            GUI.color = new Color(1f, 1f, 1f, alpha);
+            GUI.Box(rect, "");
+            Color c = popup.points >= 0 ? GainColor : LossColor;
+            c.a = alpha;
+            popupStyle.normal.textColor = c;
+            GUI.Label(rect, text, popupStyle);
+            y += 32f;
+        }
         GUI.color = previous;
     }
 
@@ -327,7 +511,7 @@ public class PrototypeGameManager : MonoBehaviour
     private void DrawInventoryRow(Rect row, string label, int left, int total, Vector2 iconSize,
         Color iconColor, Color accent, bool active)
     {
-        rowStyle.normal.textColor = active ? accent : new Color(0.7f, 0.7f, 0.7f);
+        rowStyle.normal.textColor = active ? accent : MutedText;
         GUI.Label(new Rect(row.x, row.y, 125f, row.height), $"{label}  {left}/{total}", rowStyle);
 
         Color previous = GUI.color;
@@ -342,16 +526,100 @@ public class PrototypeGameManager : MonoBehaviour
                 Texture2D.whiteTexture);
             x += iconSize.x + 5f;
         }
-        if (total > MaxIcons)
-        {
-            GUI.color = previous;
-            GUI.Label(new Rect(x, row.y, 40f, row.height), "+", rowStyle);
-        }
-        if (total == 0)
-        {
-            GUI.color = previous;
-            GUI.Label(new Rect(x, row.y, 140f, row.height), "none this round", rowStyle);
-        }
         GUI.color = previous;
+        if (total > MaxIcons)
+            GUI.Label(new Rect(x, row.y, 40f, row.height), "+", rowStyle);
+        if (total == 0)
+            GUI.Label(new Rect(x, row.y, 140f, row.height), "none this round", rowStyle);
+    }
+
+    private void DrawScores()
+    {
+        Rect panel = ScoresRect;
+        GUI.Box(panel, "");
+        rowStyle.normal.textColor = Color.white;
+        GUI.Label(new Rect(panel.x + 12f, panel.y + 8f, panel.width - 24f, 26f), "Scores", rowStyle);
+
+        float y = panel.y + 40f;
+        for (int player = 0; player < playerCount; player++)
+        {
+            DrawScoreRow(new Rect(panel.x + 8f, y, panel.width - 16f, 26f), player,
+                player == CurrentPlayer);
+            y += 28f;
+        }
+        GUI.Label(new Rect(panel.x, y + 4f, panel.width, 20f),
+            $"Shooting:  obelisk {shootObeliskPoints:+#;-#;0},  monument {shootMonumentPoints:+#;-#;0}", hintStyle);
+        GUI.Label(new Rect(panel.x, y + 22f, panel.width, 20f),
+            $"Building:  obelisk {buildObeliskPoints:+#;-#;0},  monument {buildMonumentPoints:+#;-#;0}", hintStyle);
+    }
+
+    private void DrawScoreRow(Rect row, int player, bool highlight)
+    {
+        Color previous = GUI.color;
+        if (highlight)
+        {
+            GUI.color = new Color(1f, 1f, 1f, 0.1f);
+            GUI.DrawTexture(row, Texture2D.whiteTexture);
+        }
+        GUI.color = PlayerColor(player);
+        GUI.DrawTexture(new Rect(row.x + 6f, row.y + (row.height - 12f) * 0.5f, 12f, 12f), Texture2D.whiteTexture);
+        GUI.color = previous;
+
+        rowStyle.normal.textColor = highlight ? PlayerColor(player) : Color.white;
+        GUI.Label(new Rect(row.x + 26f, row.y, row.width - 90f, row.height), $"Player {player + 1}", rowStyle);
+        rowRightStyle.normal.textColor = Color.white;
+        GUI.Label(new Rect(row.x, row.y, row.width - 8f, row.height), scores[player].ToString(), rowRightStyle);
+    }
+
+    private void DrawEndScreen()
+    {
+        Color previous = GUI.color;
+        GUI.color = new Color(0f, 0f, 0f, 0.65f);
+        GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
+        GUI.color = previous;
+
+        int best = int.MinValue;
+        for (int player = 0; player < playerCount; player++) best = Mathf.Max(best, scores[player]);
+        List<int> winners = new List<int>();
+        for (int player = 0; player < playerCount; player++)
+            if (scores[player] == best) winners.Add(player);
+        List<int> order = new List<int>();
+        for (int player = 0; player < playerCount; player++) order.Add(player);
+        order.Sort((a, b) => scores[b].CompareTo(scores[a]));
+
+        float width = 440f;
+        float height = 196f + playerCount * 30f + (collapsedBy >= 0 ? 26f : 0f);
+        Rect panel = new Rect((Screen.width - width) * 0.5f, (Screen.height - height) * 0.5f, width, height);
+        GUI.Box(panel, "");
+
+        float y = panel.y + 14f;
+        headingStyle.normal.textColor = MutedText;
+        GUI.Label(new Rect(panel.x, y, width, 28f), "Game over", headingStyle);
+        y += 34f;
+
+        bool tie = winners.Count > 1;
+        bigStyle.normal.textColor = tie ? Color.white : PlayerColor(winners[0]);
+        GUI.Label(new Rect(panel.x, y, width, 44f), tie ? "It's a tie!" : $"Player {winners[0] + 1} wins!", bigStyle);
+        y += 50f;
+
+        if (collapsedBy >= 0)
+        {
+            hintStyle.normal.textColor = LossColor;
+            GUI.Label(new Rect(panel.x, y, width, 22f),
+                $"Player {collapsedBy + 1} knocked over the tower: points reset to 0", hintStyle);
+            hintStyle.normal.textColor = MutedText;
+            y += 26f;
+        }
+
+        y += 6f;
+        foreach (int player in order)
+        {
+            DrawScoreRow(new Rect(panel.x + 70f, y, width - 140f, 26f), player, winners.Contains(player));
+            y += 30f;
+        }
+
+        y += 12f;
+        detailStyle.normal.textColor = Color.white;
+        GUI.Label(new Rect(panel.x, y, width, 24f), "Press R to play again", detailStyle);
     }
 }

@@ -8,11 +8,15 @@ public class PrototypeBlock : MonoBehaviour
     public Rigidbody Body { get; private set; }
     private PrototypeGameManager manager;
     private Collider ground;
+    private float fallHeight;
 
-    public void Initialize(PrototypeGameManager owner, Collider groundCollider, bool obelisk, int player)
+    // Ground is optional; dropping below fallHeight always counts as fallen.
+    public void Initialize(PrototypeGameManager owner, Collider groundCollider, float fallBelowY,
+        bool obelisk, int player)
     {
         manager = owner;
         ground = groundCollider;
+        fallHeight = fallBelowY;
         IsObelisk = obelisk;
         PlacedBy = player;
         Body = GetComponent<Rigidbody>();
@@ -30,7 +34,7 @@ public class PrototypeBlock : MonoBehaviour
 
     private void FixedUpdate()
     {
-        if (!HasFallen && ground != null && transform.position.y < ground.bounds.min.y - 10f)
+        if (!HasFallen && transform.position.y < fallHeight)
             MarkFallen();
     }
 

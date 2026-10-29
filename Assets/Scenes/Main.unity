@@ -722,7 +722,7 @@ MonoBehaviour:
   obeliskPrefab: {fileID: 2006185297165587902, guid: 85e4918051a2e4515b9460952a7a8615, type: 3}
   projectilePrefab: {fileID: 6315462914461960499, guid: 4143e5c53f7214103bf2dfd6505fcae0, type: 3}
   playerCount: 2
-  maxRounds: 10
+  maxRounds: 3
   turnSeconds: 15
 --- !u!114 &890907794
 MonoBehaviour:
